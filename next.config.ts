@@ -1,8 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Keep production checks from replacing a running dev server's output.
-  distDir: process.env.NODE_ENV === "production" ? ".next-production" : ".next",
   async rewrites() {
     const upstream = (process.env.API_UPSTREAM_URL || "http://localhost:5000").replace(/\/$/, "");
     return [
