@@ -1,0 +1,34 @@
+"use client";
+import Image from "next/image";
+import { useState,type FormEvent } from 'react';
+import { useQuery,useQueryClient } from '@tanstack/react-query';
+import { reportsApi } from '@/api/composition';
+import { apiErrorMessage } from '@/api/client';
+import type { ReviewScan } from '@/api/reports';
+import { useAuth } from '@/features/auth/auth-provider';
+import { Button } from '@/components/base/buttons/button';
+import { Input } from '@/components/base/input/input';
+import { Spinner } from '@/components/base/spinner/spinner';
+import { toast } from '@/components/base/toast/toast';
+import { Table,TableBody,TableCell,TableColumn,TableHeader,TableRow } from '@/components/base/table/table';
+import { Modal,ModalHeader,ModalBody,ModalFooter } from '@/components/base/modal/modal';
+
+import { formatNaira } from '@/utils/format';
+import { reportPage,reportPanel } from './report-ui';
+const validMoney=(value:string)=>/^(?:0|[1-9]\d{0,11})(?:\.\d{1,2})?$/.test(value);
+const errorMessage=(error:unknown)=>apiErrorMessage(error,'Could not complete the request. Please try again.');
+function OverrideForm({scan,done}:{scan:ReviewScan;done:()=>Promise<void>}){
+  const [total,setTotal]=useState(scan.total),[reason,setReason]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
+  async function approve(event:FormEvent){event.preventDefault();if(busy)return;setBusy(true);setError(null);try{await reportsApi.override(scan.id,{total,reason:reason.trim()});await done();toast.success('Supervisor override recorded.');}catch(cause){const message=errorMessage(cause);setError(message);toast.error(message);}finally{setBusy(false);}}
+  return <form onSubmit={approve} className="flex flex-col gap-5"><div className="grid gap-4 sm:grid-cols-2"><div className="flex flex-col gap-2"><p className="text-body-medium">{scan.vendor}</p><p className="text-body-2-regular text-text-secondary">{scan.date}</p>{scan.reviewReasons.map(reason=><p key={reason} className="text-body-2-regular text-text-error-primary">{reason}</p>)}<a href={scan.imageUrl} target="_blank" rel="noreferrer" className="underline">Open original image</a></div><div className="min-w-0"><Image unoptimized width={800} height={800} src={scan.imageUrl} alt={`Receipt from ${scan.vendor}`} className="h-auto max-h-80 w-full rounded-xl object-contain"/></div></div><Table aria-label="Submitted expenses" size="sm"><TableHeader><TableColumn isRowHeader>Expense</TableColumn><TableColumn>Cost</TableColumn></TableHeader><TableBody items={scan.expenses}>{item=><TableRow id={item.id}><TableCell>{item.title}</TableCell><TableCell><span className="tabular-nums">{item.cost}</span></TableCell></TableRow>}</TableBody></Table><details><summary className="cursor-pointer">Original OCR and reviewed transcript</summary><div className="mt-3 grid gap-4 sm:grid-cols-2"><div><h3>Original</h3>{scan.response.ocr.lines.map((line,index)=><p key={index} className="break-words text-body-2-regular">{index+1}. {line.text} <span className="text-text-tertiary">({line.confidencePercentage===null?'unknown':`${line.confidencePercentage}%`})</span></p>)}</div><div><h3>Reviewed</h3><pre className="whitespace-pre-wrap break-words text-body-2-regular">{scan.reviewedOcr.text}</pre></div></div></details><Input label="Confirmed invoice total" type="number" min="0.01" step="0.01" value={total} onChange={setTotal} isRequired isDisabled={busy}/><Input label="Override reason" value={reason} onChange={setReason} minLength={5} maxLength={1000} isRequired isDisabled={busy} hint="5–1000 characters."/>{error&&<p role="alert" className="text-text-error-primary">{error}</p>}<Button type="submit" className="self-start" disabled={busy||reason.trim().length<5||!validMoney(total)||Number(total)<=0}>{busy?'Approving…':'Approve with override'}</Button></form>;
+}
+
+export function ReviewsScreen(){
+ const auth=useAuth(),cache=useQueryClient();const [page,setPage]=useState(1),[selected,setSelected]=useState<string|null>(null);
+ const canApprove=auth.user?.role.type==='system'&&auth.user.role.key==='supervisor'&&auth.can('expenses:approve');
+ const pending=useQuery({queryKey:['pending-scans',auth.user?.id,page],queryFn:({signal})=>reportsApi.pending(page,signal),enabled:!!auth.user&&!!canApprove});
+ const detail=useQuery({queryKey:['saved-scan-review',auth.user?.id,selected],queryFn:({signal})=>reportsApi.scan(selected!,signal),enabled:!!selected&&!!canApprove});
+ const approved=async()=>{setSelected(null);await Promise.all(['pending-scans','report-month','report-months','monthly-summary','saved-scans','saved-scan-review'].map(key=>cache.invalidateQueries({queryKey:[key]})));};
+ if(!canApprove)return <main className={reportPage}><h1 className="text-title-2-medium">Supervisor access required</h1><p>Supervisor access required.</p></main>;
+ return <main className={reportPage}><header className="flex flex-col gap-2"><h1 className="text-title-1-semibold">Pending reviews</h1></header><section className={reportPanel}>{pending.isPending?<Spinner/>:pending.isError?<div role="alert"><p>{errorMessage(pending.error)}</p><Button variant="secondary" onClick={()=>void pending.refetch()}>Retry reviews</Button></div>:!pending.data?.length?<p className="py-6 text-text-secondary">No pending scans on this page.</p>:<div className="flex flex-col divide-y divide-separator-border">{pending.data.map(scan=><div key={scan.id} className="flex flex-wrap items-center justify-between gap-3 py-4"><div className="min-w-0"><p className="break-words text-body-medium">{scan.vendor} · {formatNaira(scan.total)}</p><p className="text-caption-1-regular text-text-secondary">{scan.date}</p>{scan.reviewReasons.map(reason=><p key={reason} className="break-words text-body-2-regular text-text-secondary">{reason}</p>)}</div><Button variant="secondary" onClick={()=>setSelected(scan.id)}>Review scan</Button></div>)}</div>}<div className="flex items-center justify-between gap-3"><Button variant="secondary" disabled={page===1||pending.isFetching} onClick={()=>setPage(value=>value-1)}>Previous</Button><span>Page {page}</span><Button variant="secondary" disabled={(pending.data?.length??0)<25||pending.isFetching} onClick={()=>setPage(value=>value+1)}>Next</Button></div></section><Modal isOpen={!!selected} onOpenChange={open=>{if(!open)setSelected(null);}} size="xl" className="max-h-[90dvh]"><ModalHeader title="Supervisor receipt review" /><ModalBody>{detail.isPending?<Spinner/>:detail.isError?<div role="alert"><p>{errorMessage(detail.error)}</p><Button onClick={()=>void detail.refetch()}>Retry</Button></div>:detail.data?.override?<p>Already approved: {detail.data.override.reason}</p>:detail.data&&<OverrideForm key={detail.data.id} scan={detail.data} done={approved}/>}</ModalBody><ModalFooter><Button variant="secondary" onClick={()=>setSelected(null)}>Close</Button></ModalFooter></Modal></main>;
+}

@@ -1,0 +1,14 @@
+/* Neutral primary actions; blue remains the accent and focus color. */
+:root {
+  --gradient-button-primary-default: linear-gradient(var(--color-neutral-950), var(--color-neutral-950));
+  --gradient-button-primary-hover: linear-gradient(var(--color-neutral-800), var(--color-neutral-800));
+  --gradient-button-primary-active: linear-gradient(var(--color-neutral-900), var(--color-neutral-900));
+}
+.dark {
+  --gradient-button-primary-default: linear-gradient(var(--color-neutral-100), var(--color-neutral-100));
+  --gradient-button-primary-hover: linear-gradient(var(--color-neutral-300), var(--color-neutral-300));
+  --gradient-button-primary-active: linear-gradient(var(--color-neutral-200), var(--color-neutral-200));
+}
+.dark .bg-button-primary:not(:disabled):not([aria-disabled="true"]) {
+  color: var(--color-background-primary-default);
+}
