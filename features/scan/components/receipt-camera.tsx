@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { RiCameraLine } from "@remixicon/react";
+import type { Quad } from "@quannqit/doc-scanner";
 import { Button } from "@/components/base/buttons/button";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "@/components/base/modal/modal";
 import { Spinner } from "@/components/base/spinner/spinner";
@@ -20,7 +21,15 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
   const captureLock = useRef(false);
   const [ready, setReady] = useState(false);
   const [capturing, setCapturing] = useState(false);
+  const [corners, setCorners] = useState<Quad | null>(null);
+  const [detectorReady, setDetectorReady] = useState(false);
+  const [detectorError, setDetectorError] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cameraSize, setCameraSize] = useState({ width: 16, height: 9 });
+  const cameraWidth = cameraSize.width;
+  const cameraHeight = cameraSize.height;
+  const cameraRatio = cameraWidth / cameraHeight;
+  const detectorFrameHeight = Math.round(360 / cameraRatio);
 
   useEffect(() => {
     mounted.current = true;
@@ -60,6 +69,49 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
     };
   }, []);
 
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const source = video.current;
+    const previewWidth = 360;
+    const frame = document.createElement("canvas");
+    const frameContext = frame.getContext("2d", { willReadFrequently: true });
+    if (!source || !source.videoWidth || !source.videoHeight || !frameContext) return;
+    const context = frameContext;
+
+    frame.width = previewWidth;
+    frame.height = Math.round(previewWidth * source.videoHeight / source.videoWidth);
+
+    async function runDetector() {
+      try {
+        const { detectOnCanvas } = await import("@quannqit/doc-scanner");
+        if (cancelled) return;
+        setDetectorReady(true);
+
+        const detectFrame = () => {
+          if (cancelled || !source || source.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+          try {
+            context.drawImage(source, 0, 0, frame.width, frame.height);
+            setCorners(detectOnCanvas(frame, previewWidth)?.corners ?? null);
+          } catch {
+            setDetectorError(true);
+          }
+          timer = setTimeout(detectFrame, 180);
+        };
+        detectFrame();
+      } catch {
+        if (!cancelled) setDetectorError(true);
+      }
+    }
+
+    void runDetector();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [ready]);
+
   async function capture() {
     const element = video.current;
     if (!element || !ready || captureLock.current || !element.videoWidth || !element.videoHeight) return;
@@ -89,8 +141,45 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
   return <>
     <ModalBody>
       <div className="flex flex-col gap-4">
-        <video ref={video} autoPlay muted playsInline aria-label="Live camera preview" className="max-h-[60vh] w-full rounded-xl bg-background-secondary-default object-contain" onPlaying={() => setReady(true)} />
+        <div
+          className="relative mx-auto max-w-full overflow-hidden rounded-xl bg-background-secondary-default"
+          style={{ width: `min(100%, calc(60vh * ${cameraRatio}))`, aspectRatio: `${cameraWidth} / ${cameraHeight}` }}
+        >
+          <video
+            ref={video}
+            autoPlay
+            muted
+            playsInline
+            aria-label="Live camera preview"
+            className="h-full w-full object-contain"
+            onPlaying={() => {
+              const current = video.current;
+              if (current) setCameraSize({ width: current.videoWidth, height: current.videoHeight });
+              setReady(true);
+            }}
+          />
+          {ready && corners && (
+            <svg
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 h-full w-full text-accent-600"
+              viewBox={`0 0 360 ${detectorFrameHeight}`}
+              preserveAspectRatio="xMidYMid meet"
+            >
+              <polygon
+                points={corners.map(({ x, y }) => `${x},${y}`).join(" ")}
+                fill="currentColor"
+                fillOpacity="0.12"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeLinejoin="round"
+              />
+            </svg>
+          )}
+        </div>
         {!ready && !error && <p role="status" className="flex items-center gap-2"><Spinner size="sm" /> Opening camera…</p>}
+        {ready && !detectorReady && !detectorError && <p role="status" className="flex items-center gap-2"><Spinner size="sm" /> Loading receipt outline detection…</p>}
+        {ready && detectorReady && !detectorError && <p role="status" className="text-body-2-regular text-text-secondary">{corners ? "Receipt outline detected" : "Point the camera at a receipt to find its edges"}</p>}
+        {detectorError && <p role="status" className="text-body-2-regular text-text-secondary">Live edge detection is unavailable. You can still capture the photo.</p>}
         {error && <p role="alert" className="text-body-2-regular text-text-error-primary">{error}</p>}
       </div>
     </ModalBody>
