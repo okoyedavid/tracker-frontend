@@ -7,13 +7,37 @@ import { Button } from "@/components/base/buttons/button";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "@/components/base/modal/modal";
 import { Spinner } from "@/components/base/spinner/spinner";
 
-export function ReceiptCamera({ onClose, onCapture }: { onClose: () => void; onCapture: (file: File) => void }) {
+export type CameraAssistMode = "guide" | "auto" | "both";
+type CropSource = "auto" | "guide" | "manual" | "original";
+
+function getGuideRect(width: number, height: number) {
+  const isLandscape = width >= height;
+  const boxHeight = height * 0.78;
+  const boxWidth = Math.min(width * 0.82, boxHeight * (isLandscape ? 0.78 : 0.62));
+  return {
+    x: (width - boxWidth) / 2,
+    y: (height - boxHeight) / 2,
+    width: boxWidth,
+    height: boxHeight,
+  };
+}
+
+export function ReceiptCamera({ onClose, onCapture, assistMode = "both" }: {
+  onClose: () => void;
+  onCapture: (file: File) => void;
+  /** Can be wired to a user setting later. */
+  assistMode?: CameraAssistMode;
+}) {
   return <Modal isOpen onOpenChange={(open) => { if (!open) onClose(); }} size="lg">
-    <CameraPreview onClose={onClose} onCapture={onCapture} />
+    <CameraPreview onClose={onClose} onCapture={onCapture} assistMode={assistMode} />
   </Modal>;
 }
 
-function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture: (file: File) => void }) {
+function CameraPreview({ onClose, onCapture, assistMode }: {
+  onClose: () => void;
+  onCapture: (file: File) => void;
+  assistMode: CameraAssistMode;
+}) {
   const video = useRef<HTMLVideoElement>(null);
   const stream = useRef<MediaStream | null>(null);
   const mounted = useRef(false);
@@ -28,10 +52,11 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
   const [originalFile, setOriginalFile] = useState<File | null>(null);
   const [reviewFile, setReviewFile] = useState<File | null>(null);
   const [autoCorners, setAutoCorners] = useState<Quad | null>(null);
+  const [selectedCorners, setSelectedCorners] = useState<Quad | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorCorners, setEditorCorners] = useState<Quad | null>(null);
   const [resetCorners, setResetCorners] = useState<Quad | null>(null);
-  const [isCropped, setIsCropped] = useState(false);
+  const [cropSource, setCropSource] = useState<CropSource>("original");
   const [originalPreviewUrl, setOriginalPreviewUrl] = useState<string | null>(null);
   const [reviewPreviewUrl, setReviewPreviewUrl] = useState<string | null>(null);
   const dragCorner = useRef<number | null>(null);
@@ -41,6 +66,10 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
   const cameraHeight = cameraSize.height;
   const cameraRatio = cameraWidth / cameraHeight;
   const detectorFrameHeight = Math.round(360 / cameraRatio);
+  const showGuide = assistMode !== "auto";
+  const useAutoDetection = assistMode !== "guide";
+  const guideRect = getGuideRect(360, detectorFrameHeight);
+  const guideCornerSize = Math.min(guideRect.width, guideRect.height) * 0.1;
   useEffect(() => {
     if (!originalFile) {
       setOriginalPreviewUrl(null);
@@ -100,7 +129,7 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
   }, []);
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !useAutoDetection) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const source = video.current;
@@ -140,7 +169,22 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [ready]);
+  }, [ready, useAutoDetection]);
+
+  function toCaptureCorners(rect: { x: number; y: number; width: number; height: number }, width: number, height: number): Quad {
+    const scaleX = width / 360;
+    const scaleY = height / detectorFrameHeight;
+    const left = rect.x * scaleX;
+    const top = rect.y * scaleY;
+    const right = (rect.x + rect.width) * scaleX;
+    const bottom = (rect.y + rect.height) * scaleY;
+    return [
+      { x: left, y: top },
+      { x: right, y: top },
+      { x: right, y: bottom },
+      { x: left, y: bottom },
+    ];
+  }
 
   async function capture() {
     const element = video.current;
@@ -160,20 +204,24 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
       if (!blob) throw new Error("Could not capture the image. Try again.");
       const file = new File([blob], `receipt-${Date.now()}.jpg`, { type: "image/jpeg" });
       const { detectOnCanvas, scanImage, canvasToBlob } = await import("@quannqit/doc-scanner");
-      const detected = detectOnCanvas(canvas, 1000);
+      const detected = useAutoDetection ? detectOnCanvas(canvas, 1000) : null;
+      const guideCorners = toCaptureCorners(guideRect, canvas.width, canvas.height);
+      const shouldUseGuide = !detected && assistMode !== "auto";
+      const selectedCropCorners = detected?.corners ?? (shouldUseGuide ? guideCorners : null);
       if (!mounted.current) return;
       setCaptureCanvas(canvas);
       setOriginalFile(file);
       setAutoCorners(detected?.corners ?? null);
-      if (detected) {
-        const cropped = await scanImage(canvas, { corners: detected.corners, mode: "original", maxSide: 2400 });
+      setSelectedCorners(selectedCropCorners);
+      if (selectedCropCorners) {
+        const cropped = await scanImage(canvas, { corners: selectedCropCorners, mode: "original", maxSide: 2400 });
         const croppedBlob = await canvasToBlob(cropped.canvas, "image/jpeg", 0.92);
         if (!mounted.current) return;
         setReviewFile(new File([croppedBlob], file.name, { type: "image/jpeg" }));
-        setIsCropped(true);
+        setCropSource(detected ? "auto" : "guide");
       } else {
         setReviewFile(file);
-        setIsCropped(false);
+        setCropSource("original");
       }
     } catch (cause) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : "Could not capture the image.");
@@ -191,7 +239,8 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
       const blob = await canvasToBlob(cropped.canvas, "image/jpeg", 0.92);
       if (!mounted.current) return;
       setReviewFile(new File([blob], originalFile.name, { type: "image/jpeg" }));
-      setIsCropped(true);
+      setSelectedCorners(corners);
+      setCropSource("manual");
       setEditorOpen(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not crop the receipt. Try again.");
@@ -200,7 +249,7 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
 
   function openEditor() {
     if (!captureCanvas) return;
-    const initial = autoCorners ?? [
+    const initial = selectedCorners ?? autoCorners ?? [
       { x: captureCanvas.width * 0.05, y: captureCanvas.height * 0.05 },
       { x: captureCanvas.width * 0.95, y: captureCanvas.height * 0.05 },
       { x: captureCanvas.width * 0.95, y: captureCanvas.height * 0.95 },
@@ -232,7 +281,7 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
   function useOriginal() {
     if (!originalFile) return;
     setReviewFile(originalFile);
-    setIsCropped(false);
+    setCropSource("original");
     setEditorOpen(false);
   }
 
@@ -241,8 +290,9 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
     setOriginalFile(null);
     setReviewFile(null);
     setAutoCorners(null);
+    setSelectedCorners(null);
     setEditorCorners(null);
-    setIsCropped(false);
+    setCropSource("original");
     setError(null);
   }
 
@@ -274,7 +324,23 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
               setReady(true);
             }}
           />
-          {ready && corners && (
+          {ready && showGuide && (
+            <svg
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 h-full w-full text-background-full"
+              viewBox={`0 0 360 ${detectorFrameHeight}`}
+              preserveAspectRatio="xMidYMid meet"
+            >
+              <path
+                d={`M ${guideRect.x + guideCornerSize} ${guideRect.y} H ${guideRect.x} V ${guideRect.y + guideCornerSize} M ${guideRect.x + guideRect.width - guideCornerSize} ${guideRect.y} H ${guideRect.x + guideRect.width} V ${guideRect.y + guideCornerSize} M ${guideRect.x + guideRect.width} ${guideRect.y + guideRect.height - guideCornerSize} V ${guideRect.y + guideRect.height} H ${guideRect.x + guideRect.width - guideCornerSize} M ${guideRect.x + guideCornerSize} ${guideRect.y + guideRect.height} H ${guideRect.x} V ${guideRect.y + guideRect.height - guideCornerSize}`}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="5"
+                strokeLinecap="square"
+              />
+            </svg>
+          )}
+          {ready && useAutoDetection && corners && (
             <svg
               aria-hidden="true"
               className="pointer-events-none absolute inset-0 h-full w-full text-accent-600"
@@ -293,14 +359,15 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
           )}
         </div>
         {!ready && !error && <p role="status" className="flex items-center gap-2"><Spinner size="sm" /> Opening camera…</p>}
-        {ready && !detectorReady && !detectorError && <p role="status" className="flex items-center gap-2"><Spinner size="sm" /> Loading receipt outline detection…</p>}
-        {ready && detectorReady && !detectorError && <p role="status" className="text-body-2-regular text-text-secondary">{corners ? "Receipt outline detected" : "Point the camera at a receipt to find its edges"}</p>}
-        {detectorError && <p role="status" className="text-body-2-regular text-text-secondary">Live edge detection is unavailable. You can still capture the photo.</p>}
+        {ready && useAutoDetection && !detectorReady && !detectorError && <p role="status" className="flex items-center gap-2"><Spinner size="sm" /> Loading receipt outline detection…</p>}
+        {ready && showGuide && <p role="status" className="text-body-2-regular text-text-secondary">{corners ? "Receipt outline detected" : assistMode === "guide" ? "Keep the full receipt inside the guide; that area will be cropped" : "Keep the receipt inside the guide; detected edges will refine the crop"}</p>}
+        {ready && assistMode === "auto" && detectorReady && !detectorError && <p role="status" className="text-body-2-regular text-text-secondary">{corners ? "Receipt outline detected" : "Point the camera at a receipt to find its edges"}</p>}
+        {detectorError && <p role="status" className="text-body-2-regular text-text-secondary">{assistMode === "both" ? "Live detection is unavailable. The guide box will be used for the crop." : "Live edge detection is unavailable. You can still capture the original photo."}</p>}
         </>}
         {reviewFile && reviewPreviewUrl && (
           <div className="relative mx-auto flex max-h-[60vh] max-w-full items-center justify-center overflow-hidden rounded-xl bg-background-secondary-default">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={reviewPreviewUrl} alt={isCropped ? "Auto-cropped receipt preview" : "Original photo preview"} className="max-h-[60vh] max-w-full object-contain" />
+            <img src={reviewPreviewUrl} alt={cropSource === "original" ? "Original photo preview" : "Cropped receipt preview"} className="max-h-[60vh] max-w-full object-contain" />
             <Button
               variant="secondary"
               size="medium"
@@ -311,11 +378,12 @@ function CameraPreview({ onClose, onCapture }: { onClose: () => void; onCapture:
               onClick={openEditor}
             />
             <span className="absolute bottom-3 start-3 rounded-full bg-background-primary-default px-3 py-1 text-caption-1-semibold text-text-primary shadow-md">
-              {isCropped ? "Auto-cropped" : "Original photo"}
+              {cropSource === "auto" ? "Auto-detected crop" : cropSource === "guide" ? "Guide box crop" : cropSource === "manual" ? "Adjusted crop" : "Original photo"}
             </span>
           </div>
         )}
-        {reviewFile && !autoCorners && <p className="text-body-2-regular text-text-secondary">Receipt edges weren’t detected. Edit the crop manually or use the original photo.</p>}
+        {reviewFile && assistMode !== "guide" && !autoCorners && cropSource === "guide" && <p className="text-body-2-regular text-text-secondary">No receipt edges were detected; the guide box was cropped. Edit it or use the original photo.</p>}
+        {reviewFile && assistMode === "auto" && !autoCorners && cropSource === "original" && <p className="text-body-2-regular text-text-secondary">Receipt edges weren’t detected. Edit the crop manually or use the original photo.</p>}
         {error && <p role="alert" className="text-body-2-regular text-text-error-primary">{error}</p>}
       </div>
     </ModalBody>
